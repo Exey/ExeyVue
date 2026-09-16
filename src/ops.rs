@@ -69,7 +69,8 @@ impl fmt::Display for MergeDirection {
 pub struct MergeSettings {
     pub direction: MergeDirection,
     /// "Image Fill to biggest resolution": scale every piece up (aspect ratio kept)
-    /// so it fills the largest width (vertical), height (horizontal) or cell (grid).
+    /// so it fills the largest width (vertical), height (horizontal) or cell (grid,
+    /// centre-cropping any overflow so the cell has no padding).
     /// When off, smaller pieces are centred on transparent padding instead.
     pub fill: bool,
     /// Grid columns; `0` means automatic (`ceil(sqrt(n))`).
@@ -185,7 +186,7 @@ pub fn merge(images: &[&RgbaImage], settings: &MergeSettings) -> Option<RgbaImag
             let mut out = blank(max_w * cols as u32, max_h * rows as u32);
             for (i, img) in images.iter().enumerate() {
                 let img = if settings.fill {
-                    scale_to_fit(img, max_w, max_h)
+                    scale_to_fill(img, max_w, max_h)
                 } else {
                     Cow::Borrowed(*img)
                 };
@@ -223,13 +224,23 @@ fn scale_to_height(img: &RgbaImage, h: u32) -> Cow<'_, RgbaImage> {
     resized(img, w, h)
 }
 
-/// Largest size that fits inside `cell_w × cell_h` while keeping the aspect ratio.
-fn scale_to_fit(img: &RgbaImage, cell_w: u32, cell_h: u32) -> Cow<'_, RgbaImage> {
+/// Scale `img` up to fully cover `cell_w × cell_h` while keeping the aspect ratio
+/// (the larger of the two ratios, unlike `scale_to_fit`'s "contain"), then
+/// centre-crop the overflow so the result is exactly the cell size. This is what
+/// makes grid "fill" actually fill each cell instead of leaving pieces at their
+/// old size with padding around them.
+fn scale_to_fill(img: &RgbaImage, cell_w: u32, cell_h: u32) -> Cow<'_, RgbaImage> {
     let s = (f64::from(cell_w) / f64::from(img.width()))
-        .min(f64::from(cell_h) / f64::from(img.height()));
-    let w = (f64::from(img.width()) * s).round() as u32;
-    let h = (f64::from(img.height()) * s).round() as u32;
-    resized(img, w.min(cell_w), h.min(cell_h))
+        .max(f64::from(cell_h) / f64::from(img.height()));
+    let w = ((f64::from(img.width()) * s).round() as u32).max(cell_w);
+    let h = ((f64::from(img.height()) * s).round() as u32).max(cell_h);
+    let scaled = resized(img, w, h);
+    if w == cell_w && h == cell_h {
+        return scaled;
+    }
+    let x = (w - cell_w) / 2;
+    let y = (h - cell_h) / 2;
+    Cow::Owned(imageops::crop_imm(&*scaled, x, y, cell_w, cell_h).to_image())
 }
 
 #[cfg(test)]
@@ -333,5 +344,25 @@ mod tests {
         };
         let m = merge(&refs, &settings).unwrap();
         assert_eq!(m.dimensions(), (8, 12));
+    }
+
+    #[test]
+    fn grid_fill_covers_cells_for_mixed_aspect_ratios() {
+        // Landscape defines max_w, portrait defines max_h — neither matches the
+        // other's defining dimension, so a "contain" fit would leave each at its
+        // old size with transparent padding around it instead of scaling up.
+        let landscape = solid(20, 10, 1);
+        let portrait = solid(10, 20, 2);
+        let settings = MergeSettings {
+            direction: MergeDirection::Grid,
+            fill: true,
+            columns: 2,
+        };
+        let m = merge(&[&landscape, &portrait], &settings).unwrap();
+        assert_eq!(m.dimensions(), (40, 20));
+        assert!(
+            m.pixels().all(|p| p[3] == 255),
+            "fill must cover every cell fully, with no transparent padding left over"
+        );
     }
 }

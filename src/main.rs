@@ -10,6 +10,8 @@
 
 mod formats;
 mod knife;
+#[cfg(target_os = "macos")]
+mod macos;
 mod ops;
 mod style;
 
@@ -88,17 +90,30 @@ struct Piece {
     label: String,
     pixels: RgbaImage,
     handle: iced_image::Handle,
+    /// File this piece traces back to, if any — carried through to Merge so
+    /// the result can still default Save to the same file and format.
+    source: Option<PathBuf>,
 }
 
 impl Piece {
-    fn new(label: impl Into<String>, pixels: RgbaImage) -> Self {
+    fn new(label: impl Into<String>, pixels: RgbaImage, source: Option<PathBuf>) -> Self {
         let handle = formats::handle_for(&pixels);
         Self {
             label: label.into(),
             pixels,
             handle,
+            source,
         }
     }
+}
+
+/// The file every piece in the tray traces back to, if they all agree — used
+/// to default a merge's Save to that same file and format.
+fn common_source(tray: &[Piece]) -> Option<PathBuf> {
+    let first = tray.first()?.source.clone()?;
+    tray.iter()
+        .all(|p| p.source.as_ref() == Some(&first))
+        .then_some(first)
 }
 
 struct ExeyVue {
@@ -114,11 +129,23 @@ struct ExeyVue {
 
     // Knife
     orientation: Orientation,
+    /// Normalised knife position across the cut axis.
     knife_pos: f32,
+    /// Normalised cursor position along the cut line (the magnifier follows it).
+    knife_along: f32,
+    /// Window scale factor, so the knife can draw physical-pixel-thin lines.
+    scale_factor: f32,
 
     // Merge
     tray: Vec<Piece>,
     merge: MergeSettings,
+
+    // Save
+    /// Set while a chosen .jxl target is waiting for its quality/lossless
+    /// controls to be confirmed before it's actually written.
+    pending_jxl: Option<PathBuf>,
+    jxl_quality: f32,
+    jxl_lossless: bool,
 
     // Chrome
     glass: f32,
@@ -130,6 +157,8 @@ struct ExeyVue {
 pub enum Message {
     OpenPressed,
     OpenChosen(Option<Vec<PathBuf>>),
+    /// Files handed to us by the OS (Finder "Open With", Dock drop).
+    OpenFiles(Vec<PathBuf>),
     Loaded(Result<Arc<Picture>, String>),
     FileDropped(PathBuf),
     Prev,
@@ -137,7 +166,7 @@ pub enum Message {
     SetMode(Mode),
 
     SetOrientation(Orientation),
-    KnifeHover(f32),
+    KnifeHover { across: f32, along: f32 },
     KnifeCut,
 
     AddFilesPressed,
@@ -158,10 +187,16 @@ pub enum Message {
 
     SavePressed,
     SaveChosen(Option<PathBuf>),
+    SetJxlQuality(f32),
+    SetJxlLossless(bool),
+    ConfirmJxlSave,
+    CancelJxlSave,
     Saved(Result<PathBuf, String>),
 
     Tick(Instant),
     SetGlass(f32),
+    RefreshScale,
+    ScaleFactor(f32),
 }
 
 impl ExeyVue {
@@ -176,12 +211,23 @@ impl ExeyVue {
             history: Vec::new(),
             orientation: Orientation::Vertical,
             knife_pos: 0.5,
+            knife_along: 0.5,
+            scale_factor: 1.0,
             tray: Vec::new(),
             merge: MergeSettings::default(),
+            pending_jxl: None,
+            jxl_quality: 90.0,
+            jxl_lossless: false,
             glass: 0.6,
             status: String::from("Open an image, or drop one onto the window"),
             busy: false,
         };
+
+        // Must happen before the event loop starts so a launch-by-double-click
+        // (or Dock drop) is delivered to us instead of an AppKit error box.
+        #[cfg(target_os = "macos")]
+        macos::install();
+
         let task = match std::env::args_os().nth(1) {
             Some(arg) => app.open_path(PathBuf::from(arg)),
             None => Task::none(),
@@ -214,6 +260,22 @@ impl ExeyVue {
         self.playlist = formats::siblings(&path);
         self.index = self.playlist.iter().position(|p| *p == path).unwrap_or(0);
         self.load_current()
+    }
+
+    /// Open the first supported file; any others go to the tray.
+    fn open_many(&mut self, paths: Vec<PathBuf>) -> Task<Message> {
+        let mut paths = paths.into_iter().filter(|p| formats::is_supported(p));
+        let Some(first) = paths.next() else {
+            self.status = "No supported images to open".to_owned();
+            return Task::none();
+        };
+        let open = self.open_path(first);
+        let rest: Vec<PathBuf> = paths.collect();
+        if rest.is_empty() {
+            open
+        } else {
+            Task::batch([open, self.load_into_tray(rest)])
+        }
     }
 
     fn load_current(&mut self) -> Task<Message> {
@@ -255,6 +317,22 @@ impl ExeyVue {
         }))
     }
 
+    fn start_save(&mut self, path: PathBuf) -> Task<Message> {
+        let Some(picture) = self.current.clone() else {
+            return Task::none();
+        };
+        let jxl = formats::JxlOptions {
+            quality: self.jxl_quality,
+            lossless: self.jxl_lossless,
+        };
+        self.busy = true;
+        self.status = "Saving…".to_owned();
+        Task::perform(
+            async move { formats::save(&picture.pixels, &path, jxl) },
+            Message::Saved,
+        )
+    }
+
     /// Show `picture`, remembering the previous one for Undo.
     fn replace_current(&mut self, picture: Arc<Picture>) {
         if let Some(prev) = self.current.take() {
@@ -269,23 +347,11 @@ impl ExeyVue {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::OpenPressed => Task::perform(pick_images("Open image"), Message::OpenChosen),
-            Message::OpenChosen(paths) => {
-                let Some(paths) = paths else {
-                    return Task::none();
-                };
-                let mut paths = paths.into_iter();
-                let Some(first) = paths.next() else {
-                    return Task::none();
-                };
-                let open = self.open_path(first);
-                let rest: Vec<PathBuf> = paths.collect();
-                if rest.is_empty() {
-                    open
-                } else {
-                    // Extra selections go straight to the tray.
-                    Task::batch([open, self.load_into_tray(rest)])
-                }
-            }
+            Message::OpenChosen(paths) => match paths {
+                Some(paths) => self.open_many(paths),
+                None => Task::none(),
+            },
+            Message::OpenFiles(paths) => self.open_many(paths),
             Message::Loaded(Ok(picture)) => {
                 self.busy = false;
                 self.status = describe(&picture);
@@ -326,8 +392,9 @@ impl ExeyVue {
                 self.orientation = orientation;
                 Task::none()
             }
-            Message::KnifeHover(t) => {
-                self.knife_pos = t;
+            Message::KnifeHover { across, along } => {
+                self.knife_pos = across;
+                self.knife_along = along;
                 Task::none()
             }
             Message::KnifeCut => {
@@ -347,8 +414,16 @@ impl ExeyVue {
                             }
                         }
                         .unwrap_or(0);
-                        self.tray.push(Piece::new(format!("{stem}·{a}"), first));
-                        self.tray.push(Piece::new(format!("{stem}·{b}"), second));
+                        self.tray.push(Piece::new(
+                            format!("{stem}·{a}"),
+                            first,
+                            picture.source.clone(),
+                        ));
+                        self.tray.push(Piece::new(
+                            format!("{stem}·{b}"),
+                            second,
+                            picture.source.clone(),
+                        ));
                         self.status = format!(
                             "Cut at {px} px → two pieces added to the tray ({} total)",
                             self.tray.len()
@@ -368,8 +443,11 @@ impl ExeyVue {
                 None => Task::none(),
             },
             Message::TrayLoaded(Ok(picture)) => {
-                self.tray
-                    .push(Piece::new(picture.name.clone(), picture.pixels.clone()));
+                self.tray.push(Piece::new(
+                    picture.name.clone(),
+                    picture.pixels.clone(),
+                    picture.source.clone(),
+                ));
                 self.status = format!("Added {} to the tray", picture.name);
                 Task::none()
             }
@@ -379,8 +457,11 @@ impl ExeyVue {
             }
             Message::AddCurrentToTray => {
                 if let Some(picture) = &self.current {
-                    self.tray
-                        .push(Piece::new(picture.name.clone(), picture.pixels.clone()));
+                    self.tray.push(Piece::new(
+                        picture.name.clone(),
+                        picture.pixels.clone(),
+                        picture.source.clone(),
+                    ));
                     self.status = format!("Added {} to the tray", picture.name);
                 }
                 Task::none()
@@ -407,10 +488,9 @@ impl ExeyVue {
                 let Some(piece) = self.tray.get(i) else {
                     return Task::none();
                 };
-                let picture = Arc::new(Picture::from_rgba(
-                    piece.label.clone(),
-                    piece.pixels.clone(),
-                ));
+                let mut picture = Picture::from_rgba(piece.label.clone(), piece.pixels.clone());
+                picture.source = piece.source.clone();
+                let picture = Arc::new(picture);
                 self.status = describe(&picture);
                 self.replace_current(picture);
                 Task::none()
@@ -438,13 +518,17 @@ impl ExeyVue {
                 }
                 let inputs: Vec<RgbaImage> = self.tray.iter().map(|p| p.pixels.clone()).collect();
                 let settings = self.merge;
+                let source = common_source(&self.tray);
                 self.busy = true;
                 self.status = "Merging…".to_owned();
                 Task::perform(
                     async move {
                         let refs: Vec<&RgbaImage> = inputs.iter().collect();
-                        ops::merge(&refs, &settings)
-                            .map(|img| Arc::new(Picture::from_rgba("merged", img)))
+                        ops::merge(&refs, &settings).map(|img| {
+                            let mut picture = Picture::from_rgba("merged", img);
+                            picture.source = source;
+                            Arc::new(picture)
+                        })
                     },
                     Message::Merged,
                 )
@@ -479,10 +563,19 @@ impl ExeyVue {
                 let Some(picture) = &self.current else {
                     return Task::none();
                 };
-                let default_name = format!("{}.png", stem_of(&picture.name));
+                let default_name = picture
+                    .source
+                    .as_ref()
+                    .map(|p| formats::file_name(p))
+                    .unwrap_or_else(|| format!("{}.png", stem_of(&picture.name)));
+                let default_dir = picture
+                    .source
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .map(Path::to_path_buf);
                 Task::perform(
                     async move {
-                        save_dialog(default_name)
+                        save_dialog(default_name, default_dir)
                             .save_file()
                             .await
                             .map(|handle| handle.path().to_path_buf())
@@ -492,15 +585,30 @@ impl ExeyVue {
             }
             Message::SaveChosen(None) => Task::none(),
             Message::SaveChosen(Some(path)) => {
-                let Some(picture) = self.current.clone() else {
-                    return Task::none();
-                };
-                self.busy = true;
-                self.status = "Saving…".to_owned();
-                Task::perform(
-                    async move { formats::save(&picture.pixels, &path) },
-                    Message::Saved,
-                )
+                if formats::is_jxl(&path) {
+                    self.pending_jxl = Some(path);
+                    self.status = "Choose JPEG XL quality, then Save".to_owned();
+                    Task::none()
+                } else {
+                    self.start_save(path)
+                }
+            }
+            Message::SetJxlQuality(quality) => {
+                self.jxl_quality = quality;
+                Task::none()
+            }
+            Message::SetJxlLossless(lossless) => {
+                self.jxl_lossless = lossless;
+                Task::none()
+            }
+            Message::ConfirmJxlSave => match self.pending_jxl.take() {
+                Some(path) => self.start_save(path),
+                None => Task::none(),
+            },
+            Message::CancelJxlSave => {
+                self.pending_jxl = None;
+                self.status = "Save cancelled".to_owned();
+                Task::none()
             }
             Message::Saved(Ok(path)) => {
                 self.busy = false;
@@ -525,6 +633,16 @@ impl ExeyVue {
                 self.glass = glass;
                 Task::none()
             }
+            Message::RefreshScale => window::get_latest()
+                .then(|id| match id {
+                    Some(id) => window::get_scale_factor(id),
+                    None => Task::none(),
+                })
+                .map(Message::ScaleFactor),
+            Message::ScaleFactor(factor) => {
+                self.scale_factor = factor;
+                Task::none()
+            }
         }
     }
 
@@ -535,8 +653,16 @@ impl ExeyVue {
 
         let drops = event::listen_with(|event, _status, _window| match event {
             Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
+            // The scale factor can change when the window lands on another screen.
+            Event::Window(window::Event::Opened { .. })
+            | Event::Window(window::Event::Moved { .. }) => Some(Message::RefreshScale),
             _ => None,
         });
+
+        #[cfg(target_os = "macos")]
+        let opened = Subscription::run(macos::opened_files).map(Message::OpenFiles);
+        #[cfg(not(target_os = "macos"))]
+        let opened = Subscription::none();
 
         let animation = match &self.current {
             Some(picture) if picture.frames.len() > 1 && self.mode == Mode::View => {
@@ -546,13 +672,16 @@ impl ExeyVue {
             _ => Subscription::none(),
         };
 
-        Subscription::batch([keys, drops, animation])
+        Subscription::batch([keys, drops, opened, animation])
     }
 
     // -- view ---------------------------------------------------------------
 
     fn view(&self) -> Element<'_, Message> {
         let mut content = column![self.toolbar(), self.stage(), self.panel()].spacing(10);
+        if let Some(path) = &self.pending_jxl {
+            content = content.push(self.jxl_panel(path));
+        }
         if self.mode != Mode::View || !self.tray.is_empty() {
             content = content.push(self.tray());
         }
@@ -653,9 +782,11 @@ impl ExeyVue {
                 match self.mode {
                     Mode::Knife => {
                         let overlay = canvas(knife::Overlay {
-                            image: iced::Size::new(picture.width as f32, picture.height as f32),
+                            pixels: &picture.pixels,
                             orientation: self.orientation,
-                            position: self.knife_pos,
+                            across: self.knife_pos,
+                            along: self.knife_along,
+                            scale_factor: self.scale_factor,
                         })
                         .width(Length::Fill)
                         .height(Length::Fill);
@@ -795,6 +926,45 @@ impl ExeyVue {
             .into()
     }
 
+    fn jxl_panel(&self, path: &Path) -> Element<'_, Message> {
+        let quality_label = if self.jxl_lossless {
+            "Lossless".to_owned()
+        } else {
+            format!("Quality {:.0}", self.jxl_quality)
+        };
+
+        let content = row![
+            text(format!("Save {} as JPEG XL", formats::file_name(path)))
+                .size(12)
+                .color(style::MUTED),
+            checkbox("Lossless", self.jxl_lossless)
+                .on_toggle(Message::SetJxlLossless)
+                .size(16)
+                .text_size(12),
+            slider(1.0..=100.0, self.jxl_quality, Message::SetJxlQuality)
+                .step(1.0)
+                .width(160),
+            text(quality_label).size(12),
+            horizontal_space(),
+            button(text("Cancel").size(12))
+                .padding([4, 10])
+                .on_press(Message::CancelJxlSave)
+                .style(style::glass_button),
+            button(text(if self.busy { "Working…" } else { "Save" }).size(12))
+                .padding([4, 14])
+                .on_press_maybe((!self.busy).then_some(Message::ConfirmJxlSave))
+                .style(style::accent_button),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+
+        container(content)
+            .padding([8, 12])
+            .width(Length::Fill)
+            .style(style::glass(0.08))
+            .into()
+    }
+
     fn tray(&self) -> Element<'_, Message> {
         let count = self.tray.len();
 
@@ -914,7 +1084,7 @@ async fn pick_images(title: &'static str) -> Option<Vec<PathBuf>> {
         })
 }
 
-fn save_dialog(default_name: String) -> rfd::AsyncFileDialog {
+fn save_dialog(default_name: String, default_dir: Option<PathBuf>) -> rfd::AsyncFileDialog {
     let mut dialog = rfd::AsyncFileDialog::new()
         .set_title("Save image as")
         .set_file_name(default_name)
@@ -923,6 +1093,9 @@ fn save_dialog(default_name: String) -> rfd::AsyncFileDialog {
         .add_filter("GIF", &["gif"]);
     if cfg!(feature = "jxl") {
         dialog = dialog.add_filter("JPEG XL", &["jxl"]);
+    }
+    if let Some(dir) = default_dir {
+        dialog = dialog.set_directory(dir);
     }
     dialog
 }

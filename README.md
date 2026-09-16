@@ -12,10 +12,12 @@ any order and direction.
 ## Features
 
 - **View** — zoom with the scroll wheel, drag to pan, `←` `→` to walk through the folder,
-  drag & drop files onto the window, open a file from the command line.
+  drag & drop files onto the window, open from the command line, Finder / Explorer
+  "Open With", or by dropping a file on the Dock icon.
 - **Formats** — PNG, JPEG, GIF (animated GIFs play), JPEG XL (`.jxl`) read *and* write.
-- **Knife** — one straight cut, horizontal or vertical. The knife line follows the mouse and
-  shows the exact pixel; click to cut. Pieces land in a tray and can be re-ordered.
+- **Knife** — one straight cut, horizontal or vertical. The knife line follows the mouse,
+  snaps to the exact pixel boundary and comes with a pixel magnifier; click to cut.
+  Pieces land in a tray and can be re-ordered.
 - **Merge** — combine tray pieces **Horizontally**, **Vertically** (default) or in a **Grid**,
   with *Fill to largest* on or off. The result becomes the current image; Undo goes back.
 - **Save** — export the current image as PNG, JPEG, GIF or JPEG XL.
@@ -60,11 +62,21 @@ exeyvue photo.png        # opens the file and indexes its folder for ← → bro
 
 ### Knife
 
-Switch to **Knife**, move the mouse over the image and the cut line follows it, with the
-pixel coordinate next to it. Click to cut. The two pieces (`name·L` / `name·R`, or
-`name·T` / `name·B`) are added to the tray at the bottom. Click a tray thumbnail to make
-that piece the current image and cut it again — repeated cuts give you as many pieces as
-you need. The original stays untouched until you save.
+Switch to **Knife** and move the mouse over the image. The cut line follows it and snaps
+to the nearest pixel boundary. It is drawn as three pixel-thin lines — one on the boundary
+and one a pixel away on each side — in *difference* colours (the image inverted), so it
+stays visible on any background and the image shows through the 1 px gaps.
+
+A magnifier rides along the line with the mouse: two 6×3-pixel blocks, one on each side
+of the cut, with the cut running through the gap between them. The upper (or left) block
+shows the last three rows (columns) that end up in the first piece, the lower (right)
+block the first three of the second piece — so you can see exactly which pixels go where.
+The pixel coordinate is shown next to it.
+
+Click to cut. The two pieces (`name·L` / `name·R`, or `name·T` / `name·B`) are added to
+the tray at the bottom. Click a tray thumbnail to make that piece the current image and
+cut it again — repeated cuts give you as many pieces as you need. The original stays
+untouched until you save.
 
 ### Merge
 
@@ -91,8 +103,12 @@ Requires a recent stable Rust toolchain (`rustup`).
 ```sh
 git clone https://github.com/Exey/ExeyVue.git
 cd ExeyVue
+./run_dev.sh path/to/image.png        # debug build + run
 cargo run --release -- path/to/image.png
 ```
+
+`run_dev.sh` accepts `NO_JXL=1` (skip the libjxl build, much faster first compile),
+`CHECK=1` (type-check only) and `CARGO_FLAGS="…"` for anything else.
 
 JPEG XL support is on by default and compiles `libjxl` from source, which needs
 **CMake** and a C++ compiler:
@@ -103,13 +119,6 @@ JPEG XL support is on by default and compiles `libjxl` from source, which needs
 | Windows | Visual Studio Build Tools (C++ workload) and CMake |
 | Linux (Debian/Ubuntu) | `sudo apt install cmake ninja-build pkg-config libgtk-3-dev libxkbcommon-dev libwayland-dev` |
 
-To build without JPEG XL (and without any native dependency beyond the GTK file dialog on
-Linux):
-
-```sh
-cargo build --release --no-default-features
-```
-
 Run the tests for the knife/merge logic with `cargo test`.
 
 ### Project layout
@@ -118,8 +127,10 @@ Run the tests for the knife/merge logic with `cargo test`.
 src/main.rs      application state, messages, update loop, UI
 src/formats.rs   decoding/encoding (image crate + libjxl)
 src/ops.rs       knife + merge, pure functions with unit tests
-src/knife.rs     canvas overlay drawing the knife line
+src/knife.rs     canvas overlay: cut lines + pixel magnifier
 src/style.rs     liquid-glass styling
+src/macos.rs     Finder / Dock "open file" events (macOS only)
+run_dev.sh       debug build + run helper
 packaging/       macOS Info.plist, Linux .desktop
 .github/         cross-platform build + release workflow
 ```

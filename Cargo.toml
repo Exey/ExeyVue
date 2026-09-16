@@ -30,6 +30,13 @@ rfd = "0.15"
 # JPEG XL via libjxl (statically linked, vendored source).
 jpegxl-rs = { version = "0.11", default-features = false, features = ["vendored"], optional = true }
 
+# macOS: receive files opened from Finder / the Dock (see src/macos.rs).
+# Versions match what winit 0.30 (iced 0.13) already pulls in.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSArray", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

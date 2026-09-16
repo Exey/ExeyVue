@@ -28,6 +28,9 @@ pub struct Picture {
     /// Pixels the edit tools operate on (the first frame for animations).
     pub pixels: RgbaImage,
     pub frames: Vec<Frame>,
+    /// File this image was loaded from, if any — Save defaults to the same
+    /// file and format (and so the same compression) when this is set.
+    pub source: Option<PathBuf>,
 }
 
 impl Picture {
@@ -43,6 +46,7 @@ impl Picture {
             height,
             pixels,
             frames: vec![frame],
+            source: None,
         }
     }
 }
@@ -65,6 +69,10 @@ pub fn is_supported(path: &Path) -> bool {
         return cfg!(feature = "jxl");
     }
     EXTENSIONS.contains(&ext.as_str())
+}
+
+pub fn is_jxl(path: &Path) -> bool {
+    extension(path) == "jxl"
 }
 
 pub fn file_name(path: &Path) -> String {
@@ -96,9 +104,9 @@ pub fn siblings(path: &Path) -> Vec<PathBuf> {
 
 pub fn load(path: &Path) -> Result<Picture, String> {
     let name = file_name(path);
-    match extension(path).as_str() {
-        "jxl" => load_jxl(path, name),
-        "gif" => load_gif(path, name),
+    let mut picture = match extension(path).as_str() {
+        "jxl" => load_jxl(path, name)?,
+        "gif" => load_gif(path, name)?,
         _ => {
             let image = image::ImageReader::open(path)
                 .map_err(|e| e.to_string())?
@@ -106,9 +114,11 @@ pub fn load(path: &Path) -> Result<Picture, String> {
                 .map_err(|e| e.to_string())?
                 .decode()
                 .map_err(|e| e.to_string())?;
-            Ok(Picture::from_rgba(name, image.into_rgba8()))
+            Picture::from_rgba(name, image.into_rgba8())
         }
-    }
+    };
+    picture.source = Some(path.to_path_buf());
+    Ok(picture)
 }
 
 fn load_gif(path: &Path, name: String) -> Result<Picture, String> {
@@ -146,12 +156,32 @@ fn load_gif(path: &Path, name: String) -> Result<Picture, String> {
         height,
         pixels,
         frames: out,
+        source: None,
     })
 }
 
+/// Encoder settings for a JPEG XL save.
+#[derive(Debug, Clone, Copy)]
+pub struct JxlOptions {
+    /// JPEG-style quality factor, 0..=100, higher is better. Ignored when
+    /// `lossless` is set.
+    pub quality: f32,
+    /// True pixel-exact encoding.
+    pub lossless: bool,
+}
+
+impl Default for JxlOptions {
+    fn default() -> Self {
+        Self {
+            quality: 90.0,
+            lossless: false,
+        }
+    }
+}
+
 /// Write `img` to `path`, choosing the codec from the extension (PNG when there is none).
-/// Returns the path actually written.
-pub fn save(img: &RgbaImage, path: &Path) -> Result<PathBuf, String> {
+/// `jxl` only matters when the target is JPEG XL. Returns the path actually written.
+pub fn save(img: &RgbaImage, path: &Path, jxl: JxlOptions) -> Result<PathBuf, String> {
     let mut path = path.to_path_buf();
     if extension(&path).is_empty() {
         path.set_extension("png");
@@ -161,7 +191,7 @@ pub fn save(img: &RgbaImage, path: &Path) -> Result<PathBuf, String> {
         "jpg" | "jpeg" => flatten_on_white(img)
             .save(&path)
             .map_err(|e| e.to_string())?,
-        "jxl" => save_jxl(img, &path)?,
+        "jxl" => save_jxl(img, &path, jxl)?,
         other => return Err(format!("unsupported output format .{other}")),
     }
     Ok(path)
@@ -236,17 +266,18 @@ fn to_rgba(bytes: Vec<u8>, width: u32, height: u32) -> Result<RgbaImage, String>
 }
 
 #[cfg(feature = "jxl")]
-fn save_jxl(img: &RgbaImage, path: &Path) -> Result<(), String> {
+fn save_jxl(img: &RgbaImage, path: &Path, opts: JxlOptions) -> Result<(), String> {
     use jpegxl_rs::encode::{EncoderFrame, EncoderResult};
 
     let runner = jpegxl_rs::ThreadsRunner::default();
-    let mut encoder = jpegxl_rs::encoder_builder()
-        .parallel_runner(&runner)
-        .has_alpha(true)
-        // Butteraugli distance: 1.0 is "visually lossless"; 0.0 would be mathematically lossless.
-        .quality(1.0)
-        .build()
-        .map_err(|e| e.to_string())?;
+    let mut builder = jpegxl_rs::encoder_builder();
+    builder.parallel_runner(&runner).has_alpha(true);
+    if opts.lossless {
+        builder.lossless(true);
+    } else {
+        builder.jpeg_quality(opts.quality);
+    }
+    let mut encoder = builder.build().map_err(|e| e.to_string())?;
     let frame = EncoderFrame::new(img.as_raw().as_slice()).num_channels(4);
     let encoded: EncoderResult<u8> = encoder
         .encode_frame(&frame, img.width(), img.height())
@@ -260,6 +291,6 @@ fn load_jxl(_path: &Path, _name: String) -> Result<Picture, String> {
 }
 
 #[cfg(not(feature = "jxl"))]
-fn save_jxl(_img: &RgbaImage, _path: &Path) -> Result<(), String> {
+fn save_jxl(_img: &RgbaImage, _path: &Path, _opts: JxlOptions) -> Result<(), String> {
     Err("this build has no JPEG XL support (enable the `jxl` feature)".into())
 }
