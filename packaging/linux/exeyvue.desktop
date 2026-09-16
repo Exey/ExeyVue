@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ExeyVue
+Comment=Fast small images viewer and editor
+Exec=exeyvue %f
+Terminal=false
+Categories=Graphics;Viewer;
+MimeType=image/png;image/jpeg;image/gif;image/jxl;

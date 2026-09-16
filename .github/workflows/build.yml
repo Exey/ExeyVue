@@ -1,0 +1,118 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            archive: ExeyVue-macos-arm64.zip
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: ExeyVue-windows-x64.zip
+          - name: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: ExeyVue-linux-x64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config \
+            libgtk-3-dev libxkbcommon-dev libwayland-dev
+
+      - name: Set up MSVC (for the libjxl build)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Test
+        if: runner.os == 'Linux'
+        run: cargo test --release --target ${{ matrix.target }}
+
+      - name: Package (macOS .app)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          APP="dist/ExeyVue.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp "target/${{ matrix.target }}/release/exeyvue" "$APP/Contents/MacOS/ExeyVue"
+          cp packaging/macos/Info.plist "$APP/Contents/Info.plist"
+          chmod +x "$APP/Contents/MacOS/ExeyVue"
+          codesign --force --deep --sign - "$APP"
+          (cd dist && zip -r "../${{ matrix.archive }}" ExeyVue.app)
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/exeyvue.exe" dist/ExeyVue.exe
+          Copy-Item README.md, LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.archive }}"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p dist/ExeyVue
+          cp "target/${{ matrix.target }}/release/exeyvue" dist/ExeyVue/exeyvue
+          cp README.md LICENSE packaging/linux/exeyvue.desktop dist/ExeyVue/
+          tar -C dist -czf "${{ matrix.archive }}" ExeyVue
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

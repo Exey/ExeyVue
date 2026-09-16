@@ -1,0 +1,41 @@
+[package]
+name = "exeyvue"
+version = "0.1.0"
+edition = "2021"
+description = "Fast small images viewer and editor"
+license = "MIT"
+repository = "https://github.com/Exey/ExeyVue"
+readme = "README.md"
+keywords = ["image", "viewer", "editor", "jxl", "iced"]
+categories = ["multimedia::images"]
+
+[[bin]]
+name = "exeyvue"
+path = "src/main.rs"
+
+[features]
+default = ["jxl"]
+# JPEG XL decode + encode through libjxl, built from source by jpegxl-src.
+# Needs cmake and a C++ toolchain. Disable with `--no-default-features`
+# to build a PNG/JPEG/GIF-only binary without any native dependencies.
+jxl = ["dep:jpegxl-rs"]
+
+[dependencies]
+# GUI. Pinned to the 0.13 API line on purpose; bump deliberately.
+iced = { version = "0.13", features = ["image", "canvas", "tokio"] }
+# Decoding/encoding for png, jpeg, gif (iced enables the rest of its codecs too).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+# Native file dialogs.
+rfd = "0.15"
+# JPEG XL via libjxl (statically linked, vendored source).
+jpegxl-rs = { version = "0.11", default-features = false, features = ["vendored"], optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev.package."*"]
+# Keep image decoding usable in debug builds.
+opt-level = 2
