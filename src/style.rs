@@ -4,7 +4,7 @@
 //! transparent window. On a compositing desktop the wallpaper shows through.
 
 use iced::widget::{button, container};
-use iced::{theme, Background, Border, Color, Shadow, Theme, Vector};
+use iced::{border, theme, Background, Border, Color, Shadow, Theme, Vector};
 
 pub const ACCENT: Color = Color {
     r: 0.42,
@@ -120,4 +120,33 @@ pub fn accent_button(_theme: &Theme, status: button::Status) -> button::Style {
 /// Invisible until hovered — used around tray thumbnails.
 pub fn flat_button(_theme: &Theme, status: button::Status) -> button::Style {
     button_style(Color::TRANSPARENT, white(0.08), white(0.14), status)
+}
+
+/// Where a mode tab sits: on its own, or as one half of a joined "duplex" button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Segment {
+    Alone,
+    Left,
+    Right,
+}
+
+/// Mode tab; glass when idle, accent when `active`. Halves of a duplex button
+/// only round their outer corners so the pair reads as one control.
+pub fn mode_button(
+    active: bool,
+    segment: Segment,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut style = if active {
+            accent_button(theme, status)
+        } else {
+            glass_button(theme, status)
+        };
+        style.border.radius = match segment {
+            Segment::Alone => 10.0.into(),
+            Segment::Left => border::Radius::default().left(10.0),
+            Segment::Right => border::Radius::default().right(10.0),
+        };
+        style
+    }
 }

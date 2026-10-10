@@ -1,6 +1,7 @@
 //! Pure image operations — no UI code here, so everything is unit-testable.
 //!
 //! * [`split`]  — the knife: one straight horizontal or vertical cut.
+//! * [`crop`]   — the dicer: cut a rectangle out of an image.
 //! * [`merge`]  — combine any number of images horizontally, vertically or in a grid.
 
 use std::borrow::Cow;
@@ -116,6 +117,62 @@ pub fn split(img: &RgbaImage, orientation: Orientation, t: f32) -> Option<(RgbaI
             ))
         }
     }
+}
+
+/// A rectangle in normalised image coordinates (0.0..=1.0 on both axes), as
+/// placed with the dicer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NormRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl NormRect {
+    /// Pixel box `(x, y, width, height)` this rectangle covers in a
+    /// `width × height` image: inside the image and at least 1×1.
+    pub fn to_pixels(self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        let edge = |start: f32, len: f32, extent: u32| {
+            let extent = extent.max(1);
+            let a = ((start.clamp(0.0, 1.0) * extent as f32).round() as u32).min(extent - 1);
+            let b = (((start + len).clamp(0.0, 1.0) * extent as f32).round() as u32)
+                .clamp(a + 1, extent);
+            (a, b - a)
+        };
+        let (x, w) = edge(self.x, self.w, width);
+        let (y, h) = edge(self.y, self.h, height);
+        (x, y, w, h)
+    }
+}
+
+/// The two rectangles the dicer starts with: side by side with a margin.
+pub fn default_dice() -> [NormRect; 2] {
+    [
+        NormRect {
+            x: 0.08,
+            y: 0.15,
+            w: 0.38,
+            h: 0.70,
+        },
+        NormRect {
+            x: 0.54,
+            y: 0.15,
+            w: 0.38,
+            h: 0.70,
+        },
+    ]
+}
+
+/// Rotate `img` 90° clockwise.
+pub fn rotate_cw(img: &RgbaImage) -> RgbaImage {
+    imageops::rotate90(img)
+}
+
+/// Cut `rect` out of `img`.
+pub fn crop(img: &RgbaImage, rect: NormRect) -> RgbaImage {
+    let (x, y, w, h) = rect.to_pixels(img.width(), img.height());
+    imageops::crop_imm(img, x, y, w, h).to_image()
 }
 
 /// Number of grid columns chosen automatically for `n` pieces.
@@ -315,6 +372,67 @@ mod tests {
         };
         let m = merge(&[&a, &b], &settings).unwrap();
         assert_eq!(m.dimensions(), (150, 100));
+    }
+
+    #[test]
+    fn rotate_cw_turns_top_left_to_top_right() {
+        let mut img = solid(4, 2, 0);
+        img.put_pixel(0, 0, Rgba([9, 0, 0, 255]));
+        let r = rotate_cw(&img);
+        assert_eq!(r.dimensions(), (2, 4));
+        assert_eq!(r.get_pixel(1, 0)[0], 9);
+    }
+
+    #[test]
+    fn norm_rect_maps_to_pixels() {
+        let r = NormRect {
+            x: 0.25,
+            y: 0.5,
+            w: 0.5,
+            h: 0.25,
+        };
+        assert_eq!(r.to_pixels(100, 40), (25, 20, 50, 10));
+        let full = NormRect {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        };
+        assert_eq!(full.to_pixels(7, 3), (0, 0, 7, 3));
+    }
+
+    #[test]
+    fn norm_rect_is_never_empty_or_outside() {
+        let tiny = NormRect {
+            x: 1.0,
+            y: 1.0,
+            w: 0.0,
+            h: 0.0,
+        };
+        assert_eq!(tiny.to_pixels(10, 10), (9, 9, 1, 1));
+        let overflow = NormRect {
+            x: 0.9,
+            y: -0.5,
+            w: 0.5,
+            h: 9.0,
+        };
+        let (x, y, w, h) = overflow.to_pixels(10, 10);
+        assert!(x + w <= 10 && y + h <= 10 && w >= 1 && h >= 1);
+    }
+
+    #[test]
+    fn crop_takes_the_requested_pixels() {
+        let mut img = solid(10, 10, 0);
+        img.put_pixel(3, 4, Rgba([200, 0, 0, 255]));
+        let r = NormRect {
+            x: 0.3,
+            y: 0.4,
+            w: 0.2,
+            h: 0.2,
+        };
+        let piece = crop(&img, r);
+        assert_eq!(piece.dimensions(), (2, 2));
+        assert_eq!(piece.get_pixel(0, 0)[0], 200);
     }
 
     #[test]

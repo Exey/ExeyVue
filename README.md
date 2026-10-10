@@ -3,9 +3,9 @@
 **Fast small images viewer and editor.**
 
 A minimal, liquid-glass image viewer written in Rust with [iced](https://iced.rs).
-It opens PNG, JPEG, GIF (animated) and JPEG XL, and ships two editing tools to start
-with: a **Knife** that splits an image, and **Merge** that puts pieces back together in
-any order and direction.
+It opens PNG, JPEG, GIF (animated), JPEG XL and HEIC/HEIF, and ships three editing tools:
+a **Knife** that splits an image, a **Dicer** that cuts two rectangles out of it, and
+**Merge** that puts pieces back together in any order and direction.
 
 <!-- Screenshot: docs/screenshot.png -->
 
@@ -14,10 +14,13 @@ any order and direction.
 - **View** — zoom with the scroll wheel, drag to pan, `←` `→` to walk through the folder,
   drag & drop files onto the window, open from the command line, Finder / Explorer
   "Open With", or by dropping a file on the Dock icon.
-- **Formats** — PNG, JPEG, GIF (animated GIFs play), JPEG XL (`.jxl`) read *and* write.
+- **Formats** — PNG, JPEG, GIF (animated GIFs play), JPEG XL (`.jxl`) read *and* write;
+  HEIC / HEIF (`.heic`, `.heif`) read-only.
 - **Knife** — one straight cut, horizontal or vertical. The knife line follows the mouse,
   snaps to the exact pixel boundary and comes with a pixel magnifier; click to cut.
   Pieces land in a tray and can be re-ordered.
+- **Dicer** — two rectangles you move and resize on the image; **Dice** cuts both out
+  into the tray, ready for Merge.
 - **Merge** — combine tray pieces **Horizontally**, **Vertically** (default) or in a **Grid**,
   with *Fill to largest* on or off. The result becomes the current image; Undo goes back.
 - **Save** — export the current image as PNG, JPEG, GIF or JPEG XL.
@@ -54,6 +57,7 @@ exeyvue photo.png        # opens the file and indexes its folder for ← → bro
 | `←` / `→` | Previous / next image in the folder |
 | `Esc` | Back to View mode |
 | `K` | Knife mode |
+| `D` | Dicer mode |
 | `M` | Merge mode |
 | `H` / `V` | Horizontal / vertical knife line |
 | `Ctrl`/`⌘` + `O` | Open… |
@@ -78,6 +82,16 @@ the tray at the bottom. Click a tray thumbnail to make that piece the current im
 cut it again — repeated cuts give you as many pieces as you need. The original stays
 untouched until you save.
 
+### Dicer
+
+Knife and Dicer are the two halves of one button in the toolbar. In **Dicer** mode two
+rectangles (blue `1`, orange `2`) sit on the image. Drag a rectangle to move it, drag an
+edge or corner to resize it; the pixel size of each is shown in its corner. They may
+overlap, and the one you touched last is drawn on top. **Reset** puts them back.
+
+**Dice** copies both regions into the tray (`name·1`, `name·2`), exactly like a knife cut
+does, so you can go straight to Merge. The image itself is left untouched.
+
 ### Merge
 
 The tray is the merge input, in the order shown; use `<` `>` under each thumbnail to
@@ -88,7 +102,7 @@ current image with **+ Current**, and drop files onto the window while in Merge 
 | --- | --- | --- | --- |
 | Horizontal | side by side | every piece scaled to the tallest height | smaller pieces centred vertically on transparent padding |
 | Vertical (default) | stacked | every piece scaled to the widest width | smaller pieces centred horizontally on transparent padding |
-| Grid | rows × columns | every piece scaled to fit the largest cell | smaller pieces centred in their cell |
+| Grid | rows × columns | every piece scaled to cover the largest cell, overflow centre-cropped | smaller pieces centred in their cell |
 
 Scaling always keeps the aspect ratio (Lanczos3). Grid columns default to
 `ceil(sqrt(n))`; set them explicitly with the slider. Padding is transparent, so save as
@@ -111,7 +125,10 @@ cargo run --release -- path/to/image.png
 `CHECK=1` (type-check only) and `CARGO_FLAGS="…"` for anything else.
 
 JPEG XL support is on by default and compiles `libjxl` from source, which needs
-**CMake** and a C++ compiler:
+**CMake** and a C++ compiler. HEIC/HEIF support is also on by default and links the
+system **libheif** (1.17 or newer, found with `pkg-config`): `brew install libheif` on
+macOS, `apt install libheif-dev` on a distribution that ships 1.17+. Without it, build
+with `--no-default-features --features jxl` (or `NO_HEIC=1 ./run_dev.sh`).
 
 | OS | Prerequisites |
 | --- | --- |
@@ -125,9 +142,10 @@ Run the tests for the knife/merge logic with `cargo test`.
 
 ```
 src/main.rs      application state, messages, update loop, UI
-src/formats.rs   decoding/encoding (image crate + libjxl)
+src/formats.rs   decoding/encoding (image crate + libjxl + libheif)
 src/ops.rs       knife + merge, pure functions with unit tests
 src/knife.rs     canvas overlay: cut lines + pixel magnifier
+src/dicer.rs     canvas overlay: two movable, resizable rectangles
 src/style.rs     liquid-glass styling
 src/macos.rs     Finder / Dock "open file" events (macOS only)
 run_dev.sh       debug build + run helper

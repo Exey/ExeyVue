@@ -8,6 +8,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod dicer;
 mod formats;
 mod knife;
 #[cfg(target_os = "macos")]
@@ -30,7 +31,7 @@ use iced::{
 use image::RgbaImage;
 
 use formats::Picture;
-use ops::{MergeDirection, MergeSettings, Orientation};
+use ops::{MergeDirection, MergeSettings, NormRect, Orientation};
 
 const APP_NAME: &str = "ExeyVue";
 
@@ -69,16 +70,16 @@ pub enum Mode {
     #[default]
     View,
     Knife,
+    Dicer,
     Merge,
 }
 
 impl Mode {
-    const ALL: [Mode; 3] = [Mode::View, Mode::Knife, Mode::Merge];
-
     fn label(self) -> &'static str {
         match self {
             Mode::View => "View",
             Mode::Knife => "Knife",
+            Mode::Dicer => "Dicer",
             Mode::Merge => "Merge",
         }
     }
@@ -136,6 +137,12 @@ struct ExeyVue {
     /// Window scale factor, so the knife can draw physical-pixel-thin lines.
     scale_factor: f32,
 
+    // Dicer
+    /// The two rectangles, in normalised image coordinates.
+    dicer: [NormRect; 2],
+    /// Which rectangle is on top / grabbed first.
+    dicer_active: usize,
+
     // Merge
     tray: Vec<Piece>,
     merge: MergeSettings,
@@ -168,6 +175,11 @@ pub enum Message {
     SetOrientation(Orientation),
     KnifeHover { across: f32, along: f32 },
     KnifeCut,
+    Rotate,
+
+    DicerChanged { rects: [NormRect; 2], active: usize },
+    DicerReset,
+    DicerCut,
 
     AddFilesPressed,
     AddFilesChosen(Option<Vec<PathBuf>>),
@@ -213,6 +225,8 @@ impl ExeyVue {
             knife_pos: 0.5,
             knife_along: 0.5,
             scale_factor: 1.0,
+            dicer: ops::default_dice(),
+            dicer_active: 1,
             tray: Vec::new(),
             merge: MergeSettings::default(),
             pending_jxl: None,
@@ -434,6 +448,51 @@ impl ExeyVue {
                 Task::none()
             }
 
+            Message::Rotate => {
+                let Some(picture) = &self.current else {
+                    return Task::none();
+                };
+                let mut rotated =
+                    Picture::from_rgba(picture.name.clone(), ops::rotate_cw(&picture.pixels));
+                rotated.source = picture.source.clone();
+                self.status = describe(&rotated);
+                self.replace_current(Arc::new(rotated));
+                Task::none()
+            }
+            Message::DicerChanged { rects, active } => {
+                self.dicer = rects;
+                self.dicer_active = active.min(1);
+                Task::none()
+            }
+            Message::DicerReset => {
+                self.dicer = ops::default_dice();
+                Task::none()
+            }
+            Message::DicerCut => {
+                let Some(picture) = &self.current else {
+                    return Task::none();
+                };
+                let stem = stem_of(&picture.name).to_owned();
+                for (i, rect) in self.dicer.iter().enumerate() {
+                    self.tray.push(Piece::new(
+                        format!("{stem}·{}", i + 1),
+                        ops::crop(&picture.pixels, *rect),
+                        picture.source.clone(),
+                    ));
+                }
+                let size = |r: &NormRect| {
+                    let (_, _, w, h) = r.to_pixels(picture.width, picture.height);
+                    format!("{w}×{h}")
+                };
+                self.status = format!(
+                    "Diced {} and {} → two pieces added to the tray ({} total)",
+                    size(&self.dicer[0]),
+                    size(&self.dicer[1]),
+                    self.tray.len()
+                );
+                Task::none()
+            }
+
             Message::AddFilesPressed => Task::perform(
                 pick_images("Add images to the tray"),
                 Message::AddFilesChosen,
@@ -563,9 +622,12 @@ impl ExeyVue {
                 let Some(picture) = &self.current else {
                     return Task::none();
                 };
+                // Formats we can only read (HEIC) default to PNG instead of a name
+                // that would fail to save.
                 let default_name = picture
                     .source
                     .as_ref()
+                    .filter(|p| formats::is_writable(p))
                     .map(|p| formats::file_name(p))
                     .unwrap_or_else(|| format!("{}.png", stem_of(&picture.name)));
                 let default_dir = picture
@@ -705,23 +767,20 @@ impl ExeyVue {
         let has_image = self.current.is_some();
         let can_browse = self.playlist.len() > 1;
 
-        let modes: Vec<Element<'_, Message>> = Mode::ALL
-            .iter()
-            .map(|&mode| {
-                let active = mode == self.mode;
-                button(text(mode.label()).size(13))
-                    .padding([5, 12])
-                    .on_press(Message::SetMode(mode))
-                    .style(move |theme, status| {
-                        if active {
-                            style::accent_button(theme, status)
-                        } else {
-                            style::glass_button(theme, status)
-                        }
-                    })
-                    .into()
-            })
-            .collect();
+        // Knife and Dicer are the two halves of one duplex button.
+        let modes = row![
+            mode_tab(Mode::View, self.mode, style::Segment::Alone),
+            button(text("↻").size(13))
+                .padding([5, 10])
+                .on_press_maybe(has_image.then_some(Message::Rotate))
+                .style(style::glass_button),
+            row![
+                mode_tab(Mode::Knife, self.mode, style::Segment::Left),
+                mode_tab(Mode::Dicer, self.mode, style::Segment::Right),
+            ],
+            mode_tab(Mode::Merge, self.mode, style::Segment::Alone),
+        ]
+        .spacing(4);
 
         let name = self
             .current
@@ -744,7 +803,7 @@ impl ExeyVue {
                 .style(style::glass_button),
             text(name).size(13).color(style::MUTED),
             horizontal_space(),
-            row(modes).spacing(4),
+            modes,
             horizontal_space(),
             text("Glass").size(12).color(style::MUTED),
             slider(0.0..=1.0, self.glass, Message::SetGlass)
@@ -787,6 +846,25 @@ impl ExeyVue {
                             across: self.knife_pos,
                             along: self.knife_along,
                             scale_factor: self.scale_factor,
+                        })
+                        .width(Length::Fill)
+                        .height(Length::Fill);
+                        stack![
+                            iced_image(handle)
+                                .content_fit(ContentFit::Contain)
+                                .width(Length::Fill)
+                                .height(Length::Fill),
+                            overlay,
+                        ]
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .into()
+                    }
+                    Mode::Dicer => {
+                        let overlay = canvas(dicer::Overlay {
+                            image: (picture.width, picture.height),
+                            rects: self.dicer,
+                            active: self.dicer_active,
                         })
                         .width(Length::Fill)
                         .height(Length::Fill);
@@ -863,6 +941,42 @@ impl ExeyVue {
                     text(readout).size(12),
                     horizontal_space(),
                     status,
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .into()
+            }
+
+            Mode::Dicer => {
+                let sizes = self
+                    .current
+                    .as_ref()
+                    .map(|p| {
+                        self.dicer
+                            .iter()
+                            .enumerate()
+                            .map(|(i, r)| {
+                                let (_, _, w, h) = r.to_pixels(p.width, p.height);
+                                format!("{} · {w}×{h}", i + 1)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("    ")
+                    })
+                    .unwrap_or_default();
+
+                row![
+                    text("Rectangles").size(12).color(style::MUTED),
+                    text(sizes).size(12),
+                    horizontal_space(),
+                    status,
+                    button(text("Reset").size(12))
+                        .padding([4, 10])
+                        .on_press(Message::DicerReset)
+                        .style(style::glass_button),
+                    button(text("Dice").size(12))
+                        .padding([4, 14])
+                        .on_press_maybe(self.current.is_some().then_some(Message::DicerCut))
+                        .style(style::accent_button),
                 ]
                 .spacing(10)
                 .align_y(Alignment::Center)
@@ -1063,6 +1177,7 @@ fn handle_key(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Mess
         Key::Character("s") if modifiers.command() => Some(Message::SavePressed),
         Key::Character("z") if modifiers.command() => Some(Message::Undo),
         Key::Character("k") => Some(Message::SetMode(Mode::Knife)),
+        Key::Character("d") => Some(Message::SetMode(Mode::Dicer)),
         Key::Character("m") => Some(Message::SetMode(Mode::Merge)),
         Key::Character("h") => Some(Message::SetOrientation(Orientation::Horizontal)),
         Key::Character("v") => Some(Message::SetOrientation(Orientation::Vertical)),
@@ -1082,6 +1197,14 @@ async fn pick_images(title: &'static str) -> Option<Vec<PathBuf>> {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         })
+}
+
+fn mode_tab<'a>(mode: Mode, current: Mode, segment: style::Segment) -> Element<'a, Message> {
+    button(text(mode.label()).size(13))
+        .padding([5, 12])
+        .on_press(Message::SetMode(mode))
+        .style(style::mode_button(mode == current, segment))
+        .into()
 }
 
 fn save_dialog(default_name: String, default_dir: Option<PathBuf>) -> rfd::AsyncFileDialog {
@@ -1112,6 +1235,7 @@ fn hint(mode: Mode) -> String {
     match mode {
         Mode::View => "Scroll to zoom, drag to pan · ← → browse the folder",
         Mode::Knife => "Move over the image to place the knife, click to cut · H / V flips the line",
+        Mode::Dicer => "Drag the two rectangles to place them, drag edges or corners to resize · Dice sends both to the tray",
         Mode::Merge => "Order the pieces in the tray, choose a direction, press Merge",
     }
     .to_owned()

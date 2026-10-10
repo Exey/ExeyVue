@@ -4,6 +4,7 @@
 #   ./run_dev.sh                  build + run
 #   ./run_dev.sh photo.png        build + run, opening a file
 #   NO_JXL=1 ./run_dev.sh         skip the libjxl build (much faster first compile)
+#   NO_HEIC=1 ./run_dev.sh        build without HEIC/HEIF (no system libheif needed)
 #   CHECK=1 ./run_dev.sh          only type-check (cargo check), don't run
 #
 # Extra cargo flags can go in CARGO_FLAGS, e.g. CARGO_FLAGS="--release".
@@ -16,8 +17,12 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 args=()
-if [[ "${NO_JXL:-0}" == "1" ]]; then
+if [[ "${NO_JXL:-0}" == "1" && "${NO_HEIC:-0}" == "1" ]]; then
   args+=(--no-default-features)
+elif [[ "${NO_JXL:-0}" == "1" ]]; then
+  args+=(--no-default-features --features heic)
+elif [[ "${NO_HEIC:-0}" == "1" ]]; then
+  args+=(--no-default-features --features jxl)
 fi
 # shellcheck disable=SC2206
 args+=(${CARGO_FLAGS:-})

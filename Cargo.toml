@@ -14,11 +14,14 @@ name = "exeyvue"
 path = "src/main.rs"
 
 [features]
-default = ["jxl"]
+default = ["jxl", "heic"]
 # JPEG XL decode + encode through libjxl, built from source by jpegxl-src.
 # Needs cmake and a C++ toolchain. Disable with `--no-default-features`
 # to build a PNG/JPEG/GIF-only binary without any native dependencies.
 jxl = ["dep:jpegxl-rs"]
+# HEIC/HEIF decode through the system libheif (`brew install libheif`,
+# `apt install libheif-dev`). Read-only; found with pkg-config.
+heic = ["dep:libheif-rs"]
 
 [dependencies]
 # GUI. Pinned to the 0.13 API line on purpose; bump deliberately.
@@ -29,6 +32,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 rfd = "0.15"
 # JPEG XL via libjxl (statically linked, vendored source).
 jpegxl-rs = { version = "0.11", default-features = false, features = ["vendored"], optional = true }
+# HEIC/HEIF via libheif.
+libheif-rs = { version = "3.0", default-features = false, features = ["v1_17"], optional = true }
 
 # macOS: receive files opened from Finder / the Dock (see src/macos.rs).
 # Versions match what winit 0.30 (iced 0.13) already pulls in.

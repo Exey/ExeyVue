@@ -5,4 +5,4 @@ Comment=Fast small images viewer and editor
 Exec=exeyvue %f
 Terminal=false
 Categories=Graphics;Viewer;
-MimeType=image/png;image/jpeg;image/gif;image/jxl;
+MimeType=image/png;image/jpeg;image/gif;image/jxl;image/heic;image/heif;

@@ -1,7 +1,8 @@
 //! Decoding and encoding for the supported formats.
 //!
 //! PNG, JPEG and GIF go through the `image` crate; JPEG XL goes through
-//! `jpegxl-rs` (libjxl) when the `jxl` feature is on.
+//! `jpegxl-rs` (libjxl) when the `jxl` feature is on; HEIC/HEIF (read-only) goes
+//! through `libheif-rs` when the `heic` feature is on.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -10,7 +11,7 @@ use iced::widget::image as iced_image;
 use image::{AnimationDecoder, RgbaImage};
 
 /// Extensions ExeyVue opens (lower-case, no dot).
-pub const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "jxl"];
+pub const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "jxl", "heic", "heif"];
 
 /// One displayable frame. Still images have exactly one.
 #[derive(Debug, Clone)]
@@ -68,7 +69,16 @@ pub fn is_supported(path: &Path) -> bool {
     if ext == "jxl" {
         return cfg!(feature = "jxl");
     }
+    if ext == "heic" || ext == "heif" {
+        return cfg!(feature = "heic");
+    }
     EXTENSIONS.contains(&ext.as_str())
+}
+
+/// Whether `save` can write this extension (HEIC/HEIF is read-only).
+pub fn is_writable(path: &Path) -> bool {
+    let ext = extension(path);
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif") || (ext == "jxl" && cfg!(feature = "jxl"))
 }
 
 pub fn is_jxl(path: &Path) -> bool {
@@ -107,6 +117,7 @@ pub fn load(path: &Path) -> Result<Picture, String> {
     let mut picture = match extension(path).as_str() {
         "jxl" => load_jxl(path, name)?,
         "gif" => load_gif(path, name)?,
+        "heic" | "heif" => load_heic(path, name)?,
         _ => {
             let image = image::ImageReader::open(path)
                 .map_err(|e| e.to_string())?
@@ -162,6 +173,7 @@ fn load_gif(path: &Path, name: String) -> Result<Picture, String> {
 
 /// Encoder settings for a JPEG XL save.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(feature = "jxl"), allow(dead_code))]
 pub struct JxlOptions {
     /// JPEG-style quality factor, 0..=100, higher is better. Ignored when
     /// `lossless` is set.
@@ -207,6 +219,47 @@ fn flatten_on_white(img: &RgbaImage) -> image::RgbImage {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// HEIC / HEIF
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "heic")]
+fn load_heic(path: &Path, name: String) -> Result<Picture, String> {
+    use libheif_rs::{ColorSpace, HeifContext, LibHeif, RgbChroma};
+
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| "file path is not valid UTF-8".to_string())?;
+    let ctx = HeifContext::read_from_file(path_str).map_err(|e| e.to_string())?;
+    let handle = ctx.primary_image_handle().map_err(|e| e.to_string())?;
+    // Rotation / mirroring stored in the file is applied by libheif while decoding.
+    let image = LibHeif::new()
+        .decode(&handle, ColorSpace::Rgb(RgbChroma::Rgba), None)
+        .map_err(|e| e.to_string())?;
+    let plane = image
+        .planes()
+        .interleaved
+        .ok_or_else(|| "HEIC image has no interleaved RGBA plane".to_string())?;
+
+    let (width, height) = (plane.width, plane.height);
+    let row_bytes = width as usize * 4;
+    let mut rgba = Vec::with_capacity(row_bytes * height as usize);
+    for row in plane.data.chunks(plane.stride).take(height as usize) {
+        rgba.extend_from_slice(
+            row.get(..row_bytes)
+                .ok_or_else(|| "HEIC decoder returned a short row".to_string())?,
+        );
+    }
+    let pixels = RgbaImage::from_raw(width, height, rgba)
+        .ok_or_else(|| "HEIC buffer does not match its dimensions".to_string())?;
+    Ok(Picture::from_rgba(name, pixels))
+}
+
+#[cfg(not(feature = "heic"))]
+fn load_heic(_path: &Path, _name: String) -> Result<Picture, String> {
+    Err("this build has no HEIC support (enable the `heic` feature)".into())
 }
 
 // ---------------------------------------------------------------------------
@@ -293,4 +346,21 @@ fn load_jxl(_path: &Path, _name: String) -> Result<Picture, String> {
 #[cfg(not(feature = "jxl"))]
 fn save_jxl(_img: &RgbaImage, _path: &Path, _opts: JxlOptions) -> Result<(), String> {
     Err("this build has no JPEG XL support (enable the `jxl` feature)".into())
+}
+
+#[cfg(all(test, feature = "heic"))]
+mod tests {
+    use super::*;
+
+    /// Point `EXEYVUE_TEST_HEIC` at any .heic/.heif file to exercise the decoder.
+    #[test]
+    fn heic_decodes_when_a_sample_is_provided() {
+        let Some(path) = std::env::var_os("EXEYVUE_TEST_HEIC") else {
+            return;
+        };
+        let picture = load(Path::new(&path)).expect("decode HEIC");
+        assert!(picture.width > 0 && picture.height > 0);
+        assert_eq!(picture.pixels.dimensions(), (picture.width, picture.height));
+        assert!(picture.pixels.pixels().any(|p| p[3] == 255), "has opaque pixels");
+    }
 }

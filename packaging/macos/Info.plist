@@ -40,6 +40,8 @@
         <string>jpeg</string>
         <string>gif</string>
         <string>jxl</string>
+        <string>heic</string>
+        <string>heif</string>
       </array>
     </dict>
   </array>
