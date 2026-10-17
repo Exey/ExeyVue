@@ -145,6 +145,8 @@ struct ExeyVue {
 
     // Merge
     tray: Vec<Piece>,
+    /// Keeps the tray panel visible in View mode after Clear emptied it.
+    tray_pinned: bool,
     merge: MergeSettings,
 
     // Save
@@ -228,6 +230,7 @@ impl ExeyVue {
             dicer: ops::default_dice(),
             dicer_active: 1,
             tray: Vec::new(),
+            tray_pinned: false,
             merge: MergeSettings::default(),
             pending_jxl: None,
             jxl_quality: 90.0,
@@ -394,6 +397,7 @@ impl ExeyVue {
             Message::Next => self.step(1),
             Message::SetMode(mode) => {
                 self.mode = mode;
+                self.tray_pinned = false;
                 if mode != Mode::View {
                     // Edit tools work on the first frame; show it.
                     self.frame = 0;
@@ -555,6 +559,7 @@ impl ExeyVue {
                 Task::none()
             }
             Message::TrayClear => {
+                self.tray_pinned = true;
                 self.tray.clear();
                 Task::none()
             }
@@ -603,7 +608,6 @@ impl ExeyVue {
                             picture.height
                         );
                         self.replace_current(picture);
-                        self.mode = Mode::View;
                     }
                     None => self.status = "Nothing to merge".to_owned(),
                 }
@@ -744,7 +748,7 @@ impl ExeyVue {
         if let Some(path) = &self.pending_jxl {
             content = content.push(self.jxl_panel(path));
         }
-        if self.mode != Mode::View || !self.tray.is_empty() {
+        if self.mode != Mode::View || !self.tray.is_empty() || self.tray_pinned {
             content = content.push(self.tray());
         }
 
@@ -1093,7 +1097,7 @@ impl ExeyVue {
                     .height(72);
                 let label = format!(
                     "{}  {}×{}",
-                    piece.label,
+                    shorten(&piece.label, 20),
                     piece.pixels.width(),
                     piece.pixels.height()
                 );
@@ -1156,6 +1160,16 @@ impl ExeyVue {
 // ---------------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------------
+
+/// `s` cut to at most `max` characters, with an ellipsis when it was longer.
+fn shorten(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_owned()
+    } else {
+        let head: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
+}
 
 fn small_button<'a>(label: &'a str, on_press: Option<Message>) -> Element<'a, Message> {
     button(text(label).size(11))

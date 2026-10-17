@@ -3,7 +3,7 @@
 **Fast small images viewer and editor.**
 
 A minimal, liquid-glass image viewer written in Rust with [iced](https://iced.rs).
-It opens PNG, JPEG, GIF (animated), JPEG XL and HEIC/HEIF, and ships three editing tools:
+It opens PNG, JPEG, GIF (animated), JPEG XL, WebP and HEIC/HEIF, and ships three editing tools:
 a **Knife** that splits an image, a **Dicer** that cuts two rectangles out of it, and
 **Merge** that puts pieces back together in any order and direction.
 
@@ -15,7 +15,7 @@ a **Knife** that splits an image, a **Dicer** that cuts two rectangles out of it
   drag & drop files onto the window, open from the command line, Finder / Explorer
   "Open With", or by dropping a file on the Dock icon.
 - **Formats** — PNG, JPEG, GIF (animated GIFs play), JPEG XL (`.jxl`) read *and* write;
-  HEIC / HEIF (`.heic`, `.heif`) read-only.
+  WebP (`.webp`) and HEIC / HEIF (`.heic`, `.heif`) read-only.
 - **Knife** — one straight cut, horizontal or vertical. The knife line follows the mouse,
   snaps to the exact pixel boundary and comes with a pixel magnifier; click to cut.
   Pieces land in a tray and can be re-ordered.

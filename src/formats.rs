@@ -11,7 +11,7 @@ use iced::widget::image as iced_image;
 use image::{AnimationDecoder, RgbaImage};
 
 /// Extensions ExeyVue opens (lower-case, no dot).
-pub const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "jxl", "heic", "heif"];
+pub const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "jxl", "heic", "heif", "webp"];
 
 /// One displayable frame. Still images have exactly one.
 #[derive(Debug, Clone)]
@@ -362,5 +362,15 @@ mod tests {
         assert!(picture.width > 0 && picture.height > 0);
         assert_eq!(picture.pixels.dimensions(), (picture.width, picture.height));
         assert!(picture.pixels.pixels().any(|p| p[3] == 255), "has opaque pixels");
+    }
+
+    /// Point `EXEYVUE_TEST_WEBP` at any .webp file to exercise the decoder.
+    #[test]
+    fn webp_decodes_when_a_sample_is_provided() {
+        let Some(path) = std::env::var_os("EXEYVUE_TEST_WEBP") else {
+            return;
+        };
+        let picture = load(Path::new(&path)).expect("decode WebP");
+        assert!(picture.width > 0 && picture.height > 0);
     }
 }

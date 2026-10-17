@@ -27,7 +27,7 @@ heic = ["dep:libheif-rs"]
 # GUI. Pinned to the 0.13 API line on purpose; bump deliberately.
 iced = { version = "0.13", features = ["image", "canvas", "tokio"] }
 # Decoding/encoding for png, jpeg, gif (iced enables the rest of its codecs too).
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # Native file dialogs.
 rfd = "0.15"
 # JPEG XL via libjxl (statically linked, vendored source).

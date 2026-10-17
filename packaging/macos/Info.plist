@@ -42,6 +42,7 @@
         <string>jxl</string>
         <string>heic</string>
         <string>heif</string>
+        <string>webp</string>
       </array>
     </dict>
   </array>
